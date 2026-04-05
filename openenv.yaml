@@ -1,0 +1,45 @@
+spec_version: 1
+name: trading_execution_env
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+
+description: "RL environment for optimal trade execution with minimal slippage"
+version: "0.1.0"
+
+tasks:
+  - id: simple-fill
+    difficulty: easy
+    description: "Fill a 10,000 share order in a stable market with minimal slippage"
+    max_steps: 20
+    reward_range: [0.0, 1.0]
+
+  - id: adaptive-execution
+    difficulty: medium
+    description: "Execute a 10,000 share order in a volatile market"
+    max_steps: 30
+    reward_range: [0.0, 1.0]
+
+  - id: multi-asset
+    difficulty: hard
+    description: "Execute a large 30,000 share order across many steps"
+    max_steps: 40
+    reward_range: [0.0, 1.0]
+
+action_space:
+  quantity: "float — number of shares to trade this step"
+  order_type: "str — market or limit"
+  limit_price: "float (optional) — only for limit orders"
+
+observation_space:
+  bid: "float — current best bid price"
+  ask: "float — current best ask price"
+  mid_price: "float — mid price"
+  volume: "float — current market volume"
+  remaining_quantity: "float — shares still to execute"
+  time_remaining: "int — steps left in episode"
+  vwap: "float — volume weighted average price so far"
+  slippage: "float — total slippage cost incurred"
+  filled: "float — total shares filled so far"
+  done: "bool — whether episode is complete"
