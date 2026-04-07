@@ -27,12 +27,14 @@ from models import TradingExecutionAction
 API_BASE_URL = os.environ["API_BASE_URL"]
 MODEL_NAME   = os.environ["MODEL_NAME"]
 HF_TOKEN     = os.environ["HF_TOKEN"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 SPACE_URL    = os.environ.get("SPACE_URL", "http://localhost:8000")
 
-# ── OpenAI client pointing to HF inference API ────────────────────────────
+
+# print("GROQ KEY:", os.environ.get("GROQ_API_KEY", "NOT FOUND")[:15])
 llm = OpenAI(
     base_url=API_BASE_URL,
-    api_key=HF_TOKEN,
+    api_key=GROQ_API_KEY,
 )
 
 TASKS = ["simple-fill", "adaptive-execution", "multi-asset"]
