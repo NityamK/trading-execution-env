@@ -26,12 +26,9 @@ from models import TradingExecutionAction
 # ── Environment variables ──────────────────────────────────────────────────
 API_BASE_URL = os.environ["API_BASE_URL"]
 MODEL_NAME   = os.environ["MODEL_NAME"]
-HF_TOKEN     = os.environ["HF_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 SPACE_URL    = os.environ.get("SPACE_URL", "http://localhost:8000")
 
-
-# print("GROQ KEY:", os.environ.get("GROQ_API_KEY", "NOT FOUND")[:15])
 llm = OpenAI(
     base_url=API_BASE_URL,
     api_key=GROQ_API_KEY,
@@ -43,21 +40,31 @@ TASKS = ["simple-fill", "adaptive-execution", "multi-asset"]
 def get_llm_action(obs, task_id: str) -> TradingExecutionAction:
     """Ask the LLM what action to take given current market observation."""
 
+    urgency = ""
+    if obs.time_remaining <= 3:
+        urgency = f"URGENT: Only {obs.time_remaining} steps left! Trade ALL remaining shares now!"
+    elif obs.time_remaining <= 5:
+        urgency = "WARNING: Time running out. Be aggressive."
+
     prompt = f"""You are an expert trade execution agent.
-Your goal is to fill a large order with minimal slippage.
+Your goal is to fill the entire order while managing slippage.
 
 Current market state:
 - Task: {task_id}
 - Bid: {obs.bid:.4f}
 - Ask: {obs.ask:.4f}
 - Mid price: {obs.mid_price:.4f}
+- Price momentum: {obs.price_momentum:.6f}
+- Recent volatility: {obs.volatility:.6f}
 - Market volume: {obs.volume:.0f}
-- Shares remaining to fill: {obs.remaining_quantity:.0f}
+- Shares remaining: {obs.remaining_quantity:.0f}
+- Fill rate: {obs.fill_rate:.4f}
 - Steps remaining: {obs.time_remaining}
-- Current VWAP: {obs.vwap:.4f}
+- VWAP so far: {obs.vwap:.4f}
 - Slippage so far: {obs.slippage:.4f}
 
-Decide how many shares to buy this step.
+{urgency}
+
 Rules:
 - quantity must be between 0 and {obs.remaining_quantity:.0f}
 - If time is running out, be more aggressive
@@ -76,25 +83,28 @@ Reply with ONLY a JSON object, no explanation:
 
     raw = response.choices[0].message.content.strip()
 
-    # Clean up response in case LLM adds extra text
     try:
-        # Find JSON in response
         start = raw.index("{")
         end = raw.rindex("}") + 1
         action_json = json.loads(raw[start:end])
+        quantity = float(action_json["quantity"])
+        quantity = min(max(quantity, 0.0), float(obs.remaining_quantity))
         return TradingExecutionAction(
-            quantity=float(action_json["quantity"]),
+            quantity=quantity,
             order_type=action_json.get("order_type", "market"),
         )
     except Exception:
-        # Fallback: trade evenly across remaining steps
-        safe_qty = obs.remaining_quantity / max(obs.time_remaining, 1)
-        return TradingExecutionAction(quantity=safe_qty, order_type="market")
+        # Fallback: aggressive TWAP with urgency boost
+        steps_remaining = max(int(obs.time_remaining), 1)
+        quantity = float(obs.remaining_quantity) / steps_remaining
+        if obs.time_remaining <= 3:
+            quantity = float(obs.remaining_quantity)
+        elif obs.time_remaining <= 5:
+            quantity *= 1.5
+        return TradingExecutionAction(quantity=quantity, order_type="market")
 
 
 def run_task(task_id: str):
-    """Run a single task episode and print structured logs."""
-
     print(json.dumps({
         "type": "[START]",
         "task_id": task_id,
@@ -102,15 +112,15 @@ def run_task(task_id: str):
         "model": MODEL_NAME,
     }), flush=True)
 
-    with TradingExecutionEnv(base_url=SPACE_URL).sync() as env:
-        result = env.reset()
+    with TradingExecutionEnv(base_url=SPACE_URL, task_id=task_id).sync() as env:
+        # Pass task_id through reset so the server selects the correct task
+        result = env.reset(task_id=task_id)
         obs = result.observation
         total_reward = 0.0
         step = 0
 
         while not obs.done:
             action = get_llm_action(obs, task_id)
-
             result = env.step(action)
             obs = result.observation
             reward = result.reward or 0.0
@@ -139,7 +149,6 @@ def run_task(task_id: str):
         "final_filled": obs.filled,
         "final_slippage": obs.slippage,
     }), flush=True)
-
 
 def main():
     """Run all tasks sequentially."""
