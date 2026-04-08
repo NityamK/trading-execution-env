@@ -14,18 +14,14 @@ version = "0.1.0"
 description = "Trading Execution Env environment for OpenEnv"
 requires-python = ">=3.10"
 dependencies = [
-    # Core OpenEnv runtime (provides FastAPI server + HTTP client types)
-    # install from github
-    # "openenv-core[core] @ git+https://github.com/meta-pytorch/OpenEnv.git",
-    "openenv-core[core]>=0.3.0",
-    # Environment-specific dependencies
-    # Add all dependencies needed for your environment here
-    # Examples:
-    # "numpy>=1.19.0",
-    # "torch>=2.0.0",
-    # "gymnasium>=0.29.0",
-    # "openspiel>=1.0.0",
-    # "smolagents>=1.22.0,<2",
+    "openenv-core[core]>=0.2.3",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "pydantic>=2.7.0",
+    "openai>=1.30.0",
+    "setuptools>=70.0.0",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +29,6 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
 ]
-
 [project.scripts]
 # Server entry point - enables running via: uv run --project . server
 # or: python -m trading_execution_env.server.app

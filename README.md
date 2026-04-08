@@ -1,16 +1,11 @@
 ---
-title: Trading Execution Environment Server
-emoji: chart
-colorFrom: yellow
-colorTo: indigo
+title: Trading Execution Env
+emoji: 📈
+colorFrom: green
+colorTo: blue
 sdk: docker
 pinned: false
-app_port: 8000
-base_path: /web
-tags:
-  - openenv
 ---
-
 # Trading Execution Environment
 
 An OpenEnv-compatible reinforcement learning environment for optimal trade execution with simulated market impact and slippage-aware rewards.
