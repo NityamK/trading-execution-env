@@ -19,7 +19,7 @@ from client import TradingExecutionEnv
 from models import TradingExecutionAction
 
 # ── Environment variables ──────────────────────────────────────────────────
-API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_KEY      = os.getenv("GROQ_API_KEY") or os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME   = os.getenv("MODEL_NAME") or "meta-llama/Llama-3.1-8B-Instruct"
 SPACE_URL    = os.getenv("SPACE_URL") or "https://nk003-trading-execution-env.hf.space"
@@ -36,26 +36,61 @@ TEMPERATURE = 0.1
 MAX_TOKENS  = 50
 
 
-# ── Logging functions (exact format required by hackathon) ─────────────────
+# ── Logging functions ──────────────────────────────────────────────────────
 def log_start(task: str, env: str, model: str) -> None:
+    # Hackathon required format
     print(f"[START] task={task} env={env} model={model}", flush=True)
+    # Human readable JSON
+    print(json.dumps({
+        "type": "[START]",
+        "task_id": task,
+        "space_url": SPACE_URL,
+        "model": model,
+    }), flush=True)
 
 
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str],
+             filled: float = 0.0, remaining: float = 0.0,
+             slippage: float = 0.0, vwap: float = 0.0) -> None:
     error_val = error if error else "null"
     done_val  = str(done).lower()
+    # Hackathon required format
     print(
         f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
         flush=True,
     )
+    # Human readable JSON
+    print(json.dumps({
+        "type": "[STEP]",
+        "step": step,
+        "action": action,
+        "reward": round(reward, 4),
+        "done": done,
+        "filled": filled,
+        "remaining": remaining,
+        "slippage": slippage,
+        "vwap": vwap,
+    }), flush=True)
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, score: float, rewards: List[float],
+            final_filled: float = 0.0, final_slippage: float = 0.0) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    # Hackathon required format
     print(
         f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
+    # Human readable JSON
+    print(json.dumps({
+        "type": "[END]",
+        "success": success,
+        "steps": steps,
+        "score": round(score, 4),
+        "rewards": [round(r, 4) for r in rewards],
+        "final_filled": final_filled,
+        "final_slippage": final_slippage,
+    }), flush=True)
 
 
 # ── LLM action function ────────────────────────────────────────────────────
@@ -105,7 +140,7 @@ def get_llm_action(client: OpenAI, obs, task: str) -> TradingExecutionAction:
         )
         raw   = (completion.choices[0].message.content or "").strip()
         start = raw.index("{")
-        end   = raw.rindex("}") + 1
+        end   = raw.index("}") + 1
         data  = json.loads(raw[start:end])
         qty   = min(max(float(data["quantity"]), 100.0), max_qty)
         return TradingExecutionAction(quantity=qty, order_type="market")
@@ -124,9 +159,11 @@ async def run_task(client: OpenAI, task_config: dict) -> None:
     max_steps = task_config["max_steps"]
 
     rewards: List[float] = []
-    steps_taken = 0
-    score   = 0.0
-    success = False
+    steps_taken  = 0
+    score        = 0.0
+    success      = False
+    final_filled   = 0.0
+    final_slippage = 0.0
 
     log_start(task=task, env=env_name, model=MODEL_NAME)
 
@@ -148,10 +185,22 @@ async def run_task(client: OpenAI, task_config: dict) -> None:
                 error  = None
 
                 rewards.append(reward)
-                steps_taken = step
+                steps_taken    = step
+                final_filled   = obs.filled
+                final_slippage = obs.slippage
 
                 action_str = f"quantity={action.quantity:.0f},order_type={action.order_type}"
-                log_step(step=step, action=action_str, reward=reward, done=done, error=error)
+                log_step(
+                    step=step,
+                    action=action_str,
+                    reward=reward,
+                    done=done,
+                    error=error,
+                    filled=obs.filled,
+                    remaining=obs.remaining_quantity,
+                    slippage=obs.slippage,
+                    vwap=obs.vwap,
+                )
 
                 if done:
                     break
@@ -164,7 +213,14 @@ async def run_task(client: OpenAI, task_config: dict) -> None:
         print(f"[DEBUG] Task {task} error: {exc}", flush=True)
 
     finally:
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        log_end(
+            success=success,
+            steps=steps_taken,
+            score=score,
+            rewards=rewards,
+            final_filled=final_filled,
+            final_slippage=final_slippage,
+        )
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
