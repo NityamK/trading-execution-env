@@ -1,175 +1,180 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
-Inference script for Trading Execution Environment.
-Uses an LLM agent to execute trades via the OpenEnv interface.
+Inference Script for Trading Execution Environment
 """
 
-import json
+import asyncio
 import os
-import sys
+import json
+import textwrap
+from typing import List, Optional
 
-sys.path.insert(0, os.path.dirname(__file__))
 from dotenv import load_dotenv
-
-# Load .env file
 load_dotenv()
+
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
 
 from openai import OpenAI
 from client import TradingExecutionEnv
 from models import TradingExecutionAction
 
 # ── Environment variables ──────────────────────────────────────────────────
-API_BASE_URL = os.environ["API_BASE_URL"]
-MODEL_NAME   = os.environ["MODEL_NAME"]
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-SPACE_URL    = os.environ.get("SPACE_URL", "http://localhost:8000")
+API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME   = os.getenv("MODEL_NAME") or "meta-llama/Llama-3.1-8B-Instruct"
+SPACE_URL    = os.getenv("SPACE_URL") or "https://nk003-trading-execution-env.hf.space"
 
-llm = OpenAI(
-    base_url=API_BASE_URL,
-    api_key=GROQ_API_KEY,
-)
+# ── Task configuration ─────────────────────────────────────────────────────
+TASKS = [
+    {"task": "simple-fill",        "env": "trading_execution", "max_steps": 20},
+    {"task": "adaptive-execution", "env": "trading_execution", "max_steps": 30},
+    {"task": "multi-asset",        "env": "trading_execution", "max_steps": 40},
+]
 
-TASKS = ["simple-fill", "adaptive-execution", "multi-asset"]
+SUCCESS_SCORE_THRESHOLD = 0.5
+TEMPERATURE = 0.1
+MAX_TOKENS  = 50
 
 
-def get_llm_action(obs, task_id: str) -> TradingExecutionAction:
-    """Ask the LLM what action to take given current market observation."""
+# ── Logging functions (exact format required by hackathon) ─────────────────
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
-    urgency = ""
-    if obs.time_remaining <= 3:
-        urgency = f"URGENT: Only {obs.time_remaining} steps left! Trade ALL remaining shares now!"
-    elif obs.time_remaining <= 5:
-        urgency = "WARNING: Time running out. Be aggressive."
 
-    prompt = f"""You are an expert trade execution agent.
-Your goal is to fill the entire order while managing slippage.
-
-Current market state:
-- Task: {task_id}
-- Bid: {obs.bid:.4f}
-- Ask: {obs.ask:.4f}
-- Mid price: {obs.mid_price:.4f}
-- Price momentum: {obs.price_momentum:.6f}
-- Recent volatility: {obs.volatility:.6f}
-- Market volume: {obs.volume:.0f}
-- Shares remaining: {obs.remaining_quantity:.0f}
-- Fill rate: {obs.fill_rate:.4f}
-- Steps remaining: {obs.time_remaining}
-- VWAP so far: {obs.vwap:.4f}
-- Slippage so far: {obs.slippage:.4f}
-
-{urgency}
-
-Rules:
-- quantity must be between 0 and {obs.remaining_quantity:.0f}
-- If time is running out, be more aggressive
-- If slippage is high, trade smaller quantities
-- order_type should always be "market"
-
-Reply with ONLY a JSON object, no explanation:
-{{"quantity": <number>, "order_type": "market"}}"""
-
-    response = llm.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=50,
-        temperature=0.1,
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
     )
 
-    raw = response.choices[0].message.content.strip()
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ── LLM action function ────────────────────────────────────────────────────
+def get_llm_action(client: OpenAI, obs, task: str) -> TradingExecutionAction:
+    """Ask LLM what action to take given current market observation."""
+
+    twap_qty = obs.remaining_quantity / max(obs.time_remaining, 1)
+    max_qty  = min(twap_qty * 2, obs.remaining_quantity)
+
+    if obs.time_remaining <= 2:
+        urgency   = f"URGENT: {obs.time_remaining} steps left. Trade {min(obs.remaining_quantity, max_qty):.0f} shares now."
+        suggested = min(obs.remaining_quantity, max_qty)
+    elif obs.time_remaining <= 5:
+        urgency   = f"WARNING: {obs.time_remaining} steps left. Trade around {twap_qty * 1.5:.0f} shares."
+        suggested = min(twap_qty * 1.5, obs.remaining_quantity)
+    else:
+        urgency   = f"Normal execution. Suggested: {twap_qty:.0f} shares."
+        suggested = twap_qty
+
+    prompt = textwrap.dedent(f"""
+        You are an expert trade execution agent.
+        Goal: fill the ENTIRE order by spreading trades across all steps.
+
+        Market state:
+        - Task: {task}
+        - Bid: {obs.bid:.4f}, Ask: {obs.ask:.4f}
+        - Volume: {obs.volume:.0f}
+        - Remaining: {obs.remaining_quantity:.0f} shares
+        - Steps left: {obs.time_remaining}
+        - VWAP: {obs.vwap:.4f}
+        - Slippage: {obs.slippage:.4f}
+
+        {urgency}
+        Never trade more than {max_qty:.0f} shares in one step.
+        Suggested: {suggested:.0f}
+
+        Reply ONLY with JSON: {{"quantity": <number>, "order_type": "market"}}
+    """).strip()
 
     try:
-        start = raw.index("{")
-        end = raw.rindex("}") + 1
-        action_json = json.loads(raw[start:end])
-        quantity = float(action_json["quantity"])
-        quantity = min(max(quantity, 0.0), float(obs.remaining_quantity))
-        return TradingExecutionAction(
-            quantity=quantity,
-            order_type=action_json.get("order_type", "market"),
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+            stream=False,
         )
-    except Exception:
-        # Fallback: aggressive TWAP with urgency boost
-        steps_remaining = max(int(obs.time_remaining), 1)
-        quantity = float(obs.remaining_quantity) / steps_remaining
-        if obs.time_remaining <= 3:
-            quantity = float(obs.remaining_quantity)
-        elif obs.time_remaining <= 5:
-            quantity *= 1.5
-        return TradingExecutionAction(quantity=quantity, order_type="market")
+        raw   = (completion.choices[0].message.content or "").strip()
+        start = raw.index("{")
+        end   = raw.rindex("}") + 1
+        data  = json.loads(raw[start:end])
+        qty   = min(max(float(data["quantity"]), 100.0), max_qty)
+        return TradingExecutionAction(quantity=qty, order_type="market")
+    except Exception as exc:
+        print(f"[DEBUG] LLM error: {exc}", flush=True)
+        return TradingExecutionAction(
+            quantity=min(twap_qty, obs.remaining_quantity),
+            order_type="market"
+        )
 
 
-def run_task(task_id: str):
-    print(json.dumps({
-        "type": "[START]",
-        "task_id": task_id,
-        "space_url": SPACE_URL,
-        "model": MODEL_NAME,
-    }), flush=True)
+# ── Task runner ────────────────────────────────────────────────────────────
+async def run_task(client: OpenAI, task_config: dict) -> None:
+    task      = task_config["task"]
+    env_name  = task_config["env"]
+    max_steps = task_config["max_steps"]
 
-    with TradingExecutionEnv(base_url=SPACE_URL, task_id=task_id).sync() as env:
-        # Pass task_id through reset so the server selects the correct task
-        result = env.reset(task_id=task_id)
-        obs = result.observation
-        total_reward = 0.0
-        step = 0
+    rewards: List[float] = []
+    steps_taken = 0
+    score   = 0.0
+    success = False
 
-        while not obs.done:
-            action = get_llm_action(obs, task_id)
-            result = env.step(action)
-            obs = result.observation
-            reward = result.reward or 0.0
-            total_reward += reward
-            step += 1
+    log_start(task=task, env=env_name, model=MODEL_NAME)
 
-            print(json.dumps({
-                "type": "[STEP]",
-                "step": step,
-                "action": {
-                    "quantity": action.quantity,
-                    "order_type": action.order_type,
-                },
-                "reward": round(reward, 4),
-                "filled": obs.filled,
-                "remaining": obs.remaining_quantity,
-                "slippage": obs.slippage,
-                "vwap": obs.vwap,
-            }), flush=True)
+    try:
+        async with TradingExecutionEnv(base_url=SPACE_URL) as env:
+            result = await env.reset()
+            obs    = result.observation
 
-    print(json.dumps({
-        "type": "[END]",
-        "task_id": task_id,
-        "total_reward": round(total_reward, 4),
-        "total_steps": step,
-        "final_filled": obs.filled,
-        "final_slippage": obs.slippage,
-    }), flush=True)
+            for step in range(1, max_steps + 1):
+                if obs.done:
+                    break
 
-def main():
-    """Run all tasks sequentially."""
-    print(f"Starting inference with model: {MODEL_NAME}", file=sys.stderr)
-    print(f"Connecting to environment at: {SPACE_URL}", file=sys.stderr)
+                action = get_llm_action(client, obs, task)
+                result = await env.step(action)
+                obs    = result.observation
 
-    for task_id in TASKS:
-        print(f"\n{'='*50}", file=sys.stderr)
-        print(f"Running task: {task_id}", file=sys.stderr)
-        print(f"{'='*50}", file=sys.stderr)
-        try:
-            run_task(task_id)
-        except Exception as e:
-            print(json.dumps({
-                "type": "[END]",
-                "task_id": task_id,
-                "error": str(e),
-                "total_reward": 0.0,
-            }), flush=True)
-            print(f"Task {task_id} failed: {e}", file=sys.stderr)
+                reward = result.reward or 0.0
+                done   = result.done
+                error  = None
+
+                rewards.append(reward)
+                steps_taken = step
+
+                action_str = f"quantity={action.quantity:.0f},order_type={action.order_type}"
+                log_step(step=step, action=action_str, reward=reward, done=done, error=error)
+
+                if done:
+                    break
+
+        score   = sum(rewards) / max(len(rewards), 1)
+        score   = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_SCORE_THRESHOLD
+
+    except Exception as exc:
+        print(f"[DEBUG] Task {task} error: {exc}", flush=True)
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+
+# ── Main ───────────────────────────────────────────────────────────────────
+async def main() -> None:
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    print(f"[DEBUG] model={MODEL_NAME} space={SPACE_URL}", flush=True)
+
+    for task_config in TASKS:
+        await run_task(client, task_config)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
