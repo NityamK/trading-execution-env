@@ -3,8 +3,7 @@ name: trading_execution_env
 type: space
 runtime: fastapi
 app: server.app:app
-port: 8000
-
+port: 7860
 description: "RL environment for optimal trade execution with minimal slippage"
 version: "0.1.0"
 
